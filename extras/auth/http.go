@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ type HTTPAuthenticator struct {
 	URL    string
 }
 
+// NewHTTPAuthenticator 创建一个新的HTTPAuthenticator
 func NewHTTPAuthenticator(url string, insecure bool) *HTTPAuthenticator {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{
@@ -51,31 +53,32 @@ type httpAuthResponse struct {
 	ID string `json:"id"`
 }
 
+// post 向配置的URL发送认证请求
 func (a *HTTPAuthenticator) post(req *httpAuthRequest) (*httpAuthResponse, error) {
-	bs, err := json.Marshal(req)
+	buf := new(bytes.Buffer)
+	err := json.NewEncoder(buf).Encode(req)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.Client.Post(a.URL, "application/json", bytes.NewReader(bs))
+
+	resp, err := a.Client.Post(a.URL, "application/json", buf)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, errInvalidStatusCode
+		return nil, fmt.Errorf("%w: received status code %d", errInvalidStatusCode, resp.StatusCode)
 	}
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+
 	var authResp httpAuthResponse
-	err = json.Unmarshal(respData, &authResp)
-	if err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
 		return nil, err
 	}
 	return &authResp, nil
 }
 
+// Authenticate 实现Authenticator接口的方法
 func (a *HTTPAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (ok bool, id string) {
 	req := &httpAuthRequest{
 		Addr: addr.String(),
@@ -84,6 +87,7 @@ func (a *HTTPAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) 
 	}
 	resp, err := a.post(req)
 	if err != nil {
+		// 可以在这里添加日志记录
 		return false, ""
 	}
 	return resp.OK, resp.ID
