@@ -600,26 +600,52 @@ func (c *serverConfig) fillAuthenticator(hyConfig *server.Config) error {
 		hyConfig.Authenticator = &auth.CommandAuthenticator{Cmd: c.Auth.Command}
 		return nil
 	case "v2board":
-		// 定时获取用户列表并储存
-		// 判断URL是否存在
-		v2boardConfig := c.V2board
-		if v2boardConfig.ApiHost == "" || v2boardConfig.ApiKey == "" || v2boardConfig.NodeID == 0 {
-			return configError{Field: "auth.v2board", Err: errors.New("v2board config error")}
-		}
-		// 创建一个url.Values来存储查询参数
-		queryParams := url.Values{}
-		queryParams.Add("token", v2boardConfig.ApiKey)
-		queryParams.Add("node_id", strconv.Itoa(int(v2boardConfig.NodeID)))
-		queryParams.Add("node_type", "hysteria")
-		// 创建完整的URL，包括查询参数
-		url := v2boardConfig.ApiHost + "/api/v1/server/UniProxy/user?" + queryParams.Encode()
+    		// 获取v2board配置
+    		v2boardConfig := c.V2board
 
-		// 创建定时更新用户UUID协程
-		go auth.UpdateUsers(url, time.Second*5)
+    		// 检查配置项是否完整
+    		if v2boardConfig.ApiHost == "" {
+       			return configError{Field: "auth.v2board.apiHost", Err: errors.New("v2board API host is missing")}
+    		}
+    		if v2boardConfig.ApiKey == "" {
+        		return configError{Field: "auth.v2board.apiKey", Err: errors.New("v2board API key is missing")}
+    		}
+    		if v2boardConfig.NodeID == 0 {
+        		return configError{Field: "auth.v2board.nodeID", Err: errors.New("v2board node ID is missing")}
+    		}
 
-		hyConfig.Authenticator = &auth.V2boardApiProvider{URL: url}
+    		// 构建查询参数
+   		queryParams := url.Values{}
+    		queryParams.Add("token", v2boardConfig.ApiKey)
+   		queryParams.Add("node_id", strconv.Itoa(int(v2boardConfig.NodeID)))
+    		queryParams.Add("node_type", "hysteria")
 
-		return nil
+    		// 构建完整的URL
+    		fullURL := v2boardConfig.ApiHost + "/api/v1/server/UniProxy/user?" + queryParams.Encode()
+
+    		// 创建定时更新用户UUID的协程
+    		go func() {
+        		// 定义更新间隔
+        		ticker := time.NewTicker(time.Second * 5)
+        		defer ticker.Stop()
+
+        		for {
+            			select {
+            			case <-ticker.C:
+                			// 调用更新用户信息的函数
+                			if err := auth.UpdateUsers(fullURL); err != nil {
+                    			// 在这里处理错误，例如记录日志
+                    			log.Printf("Error updating users: %v\n", err)
+                			}
+            			}
+        			}
+    			}()
+
+    		// 设置Authenticator
+    		hyConfig.Authenticator = &auth.V2boardApiProvider{URL: fullURL}
+
+    		return nil
+
 
 	default:
 		return configError{Field: "auth.type", Err: errors.New("unsupported auth type")}
@@ -632,20 +658,45 @@ func (c *serverConfig) fillEventLogger(hyConfig *server.Config) error {
 }
 
 func (c *serverConfig) fillTrafficLogger(hyConfig *server.Config) error {
-	if c.TrafficStats.Listen != "" {
-		tss := trafficlogger.NewTrafficStatsServer(c.TrafficStats.Secret)
-		hyConfig.TrafficLogger = tss
-		// 添加定时更新用户使用流量协程
-		if c.V2board != nil && c.V2board.ApiHost != "" {
-			// 创建一个url.Values来存储查询参数
-			queryParams := url.Values{}
-			queryParams.Add("token", c.V2board.ApiKey)
-			queryParams.Add("node_id", strconv.Itoa(int(c.V2board.NodeID)))
-			queryParams.Add("node_type", "hysteria")
-			go hyConfig.TrafficLogger.PushTrafficToV2boardInterval(c.V2board.ApiHost+"/api/v1/server/UniProxy/push?"+queryParams.Encode(), time.Second*60)
-		}
-		go runTrafficStatsServer(c.TrafficStats.Listen, tss)
+	if c.TrafficStats.Listen == "" {
+		return nil // 如果没有配置监听地址，直接返回
 	}
+
+	tss := trafficlogger.NewTrafficStatsServer(c.TrafficStats.Secret)
+	hyConfig.TrafficLogger = tss
+
+	// 启动流量统计服务器
+	go func() {
+		if err := runTrafficStatsServer(c.TrafficStats.Listen, tss); err != nil {
+			log.Printf("Traffic stats server error: %v", err)
+			// 这里可以处理错误，例如重试或退出程序
+		}
+	}()
+
+	// 如果配置了V2board，设置定时推送流量数据
+	if c.V2board != nil && c.V2board.ApiHost != "" {
+		queryParams := url.Values{}
+		queryParams.Add("token", c.V2board.ApiKey)
+		queryParams.Add("node_id", strconv.Itoa(int(c.V2board.NodeID)))
+		queryParams.Add("node_type", "hysteria")
+
+		pushURL := c.V2board.ApiHost + "/api/v1/server/UniProxy/push?" + queryParams.Encode()
+
+		go func() {
+			// 定义定时器
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				// 调用推送流量数据的函数
+				if err := tss.PushTrafficToV2board(pushURL); err != nil {
+					log.Printf("Error pushing traffic data to V2board: %v", err)
+					// 处理推送错误，例如记录日志或重试
+				}
+			}
+		}()
+	}
+
 	return nil
 }
 
